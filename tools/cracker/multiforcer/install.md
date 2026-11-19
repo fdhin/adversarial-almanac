@@ -1,0 +1,51 @@
+---
+tool: "multiforcer"
+build-system: "scripts"
+upstream: "https://sourceforge.net/projects/cryptohaze/"
+recipe: "parrot-debian"
+recipe-url: "https://deb.parrot.sh/parrot/pool/main/m/multiforcer"
+version: "1.31-1parrot1"
+---
+
+# Installing multiforcer
+
+> GPU accelerated password cracking tool A CUDA & OpenCL accelerated rainbow table implementation  from the ground up, and a CUDA hash brute forcing tool with  support for many hash types including MD5,
+
+Recipe source of truth: Parrot's Debian packaging (`.debian.tar.xz` from their pool — full `debian/control` + `debian/rules`).
+
+## Parrot / Debian-based
+
+```bash
+curl -fsSL https://deb.parrot.sh/parrot/archive/parrot-keyring.gpg | sudo tee /usr/share/keyrings/parrot.gpg
+echo "deb [signed-by=/usr/share/keyrings/parrot.gpg] https://deb.parrot.sh/parrot/ parrot main" | sudo tee /etc/apt/sources.list.d/parrot.list
+sudo apt update
+sudo apt install multiforcer
+```
+
+## Arch / BlackArch
+
+Not packaged (checked 2026-11-07) — check the AUR (`paru -Ss multiforcer`); otherwise build from source.
+
+## Any other Linux distro
+
+**From source:**
+
+**Source:** download the release from [upstream site](https://sourceforge.net/projects/cryptohaze/) (the recipe uses a versioned archive).
+
+```bash
+# run scripts directly (see recipe for interpreter and layout)
+```
+
+## Key build steps (from debian/rules)
+
+```make
+#!/usr/bin/make -f
+# -*- makefile -*-
+# As a special exception, when this file is copied by dh-make into a
+# dh-make output file, you may use that output file without restriction.
+# This special exception was added by Craig Small in version 0.37 of dh-make.
+	dh $@ 
+override_dh_shlibdeps:
+```
+
+Backlinks: [[cracker]] · [[multiforcer]] · [[Parrot Gap Analysis]]
